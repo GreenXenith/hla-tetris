@@ -1,0 +1,806 @@
+// Tetris written in High Level Assembly
+// MIT Copyright (c) 2022 GreenXenith
+
+program Main;
+
+#include("stdlib.hhf")
+
+#macro popp(params[]);
+    mov(ebp, esi);
+    #for (p in params)
+        pop(ebp);
+    #endfor;
+    mov(esi, ebp);
+#endmacro
+
+#macro extern(func, string params);
+    procedure @text("_" + func) #if (@length(params) > 0) (@text(params)) #endif; @stdcall; @external(func);
+    @text("#macro " + func + "(string p); _" + func + "(@text(p)); popp(@text(p)); #endmacro")
+#endmacro
+
+const
+    // CONFIG
+    DROP_SPEED := 750; // Speed per drop step (milliseconds)
+
+    BOARD_WIDTH := 10;
+    BOARD_HEIGHT := 20;
+
+    WIN_WIDTH := 640;
+    WIN_HEIGHT := 480;
+
+    // Dont edit these
+    STATE_START := 0;
+    STATE_END := 1;
+
+    NoEventMask       := 0;
+    KeyPressMask      := (1 << 0);
+    KeyReleaseMask    := (1 << 1);
+    ButtonPressMask   := (1 << 2);
+    ButtonReleaseMask := (1 << 3);
+    EnterWindowMask   := (1 << 4);
+    LeaveWindowMask   := (1 << 5);
+    ExposureMask      := (1 << 15);
+
+    QueuedAlready      := 0;
+    QueuedAfterReading := 1;
+    QueuedAfterFlush   := 2;
+
+    KEY_ESC   := $FF1B;
+    KEY_LEFT  := $FF51;
+    KEY_UP    := $FF52;
+    KEY_RIGHT := $FF53;
+    KEY_DOWN  := $FF54;
+
+    DIR_UP := 0;
+    DIR_RIGHT := 1;
+    DIR_DOWN := 2;
+    DIR_LEFT := 3;
+
+type
+    XBool: int32;
+
+    XID: uns32;
+    XWindow: XID;
+    XDrawable: XID;
+    XPixmap: XID;
+
+    XSetWindowAttributes: record
+        background_pixmap:     dword;
+        background_pixel:      dword;
+        border_pixmap:         dword;
+        border_pixel:          dword;
+        bit_gravity:           dword;
+        win_gravity:           dword;
+        backing_store:         dword;
+        backing_planes:        dword;
+        backing_pixel:         dword;
+        save_under:            dword;
+        event_mask:            dword;
+        do_not_propagate_mask: dword;
+        override_redirect:     dword;
+        colormap:              dword;
+        cursor:                dword;
+    endrecord;
+
+    XWindowAttributes: record
+        x:                     dword;
+        y:                     dword;
+        width:                 dword;
+        height:                dword;
+        border_width:          dword;
+        depth:                 dword;
+        visual:                dword;
+        root:                  dword;
+        winclass:              dword;
+        bit_gravity:           dword;
+        win_gravity:           dword;
+        backing_store:         dword;
+        backing_planes:        dword;
+        backing_pixel:         dword;
+        save_under:            dword;
+        colormap:              dword;
+        map_installed:         dword;
+        all_event_masks:       dword;
+        your_event_mask:       dword;
+        do_not_propagate_mask: dword;
+        override_redirect:     dword;
+        screen:                dword;
+    endrecord;
+
+    XSizeHints: record
+        flags: int32;
+        x: int32;
+        y: int32;
+        width: int32;
+        height: int32;
+        min_width: int32;
+        min_height: int32;
+        max_width: int32;
+        max_height: int32;
+        min_aspect: record
+            x: int32;
+            y: int32;
+        endrecord;
+        max_aspect: record
+            x: int32;
+            y: int32;
+        endrecord;
+        base_width: int32;
+        base_height: int32;
+        win_gravity: int32;
+    endrecord;
+
+    XKeyEvent: record
+        event_type: int32;
+        serial: uns32;
+        send_event: XBool;
+        display: dword;
+        win: XWindow;
+        root: XWindow;
+        subwindow: XWindow;
+        time: uns32;
+        x: int32;
+        y: int32;
+        x_root: int32;
+        y_root: int32;
+        state: uns32;
+        keycode: uns32;
+        same_screen: XBool;
+    endrecord;
+
+    XEvent: union
+        event_type: int32;
+        xkey: XKeyEvent;
+    endunion;
+
+    XGCValues: record
+        function: int32;
+        plane_mask: uns32;
+        foreground: uns32;
+        background: uns32;
+        line_width: int32;
+        line_style: int32;
+        cap_style: int32;
+        join_style: int32;
+        fill_style: int32;
+        fill_rule: int32;
+        arc_mode: int32;
+        tile: XPixmap;
+        stipple: XPixmap;
+        ts_x_origin: int32;
+        ts_y_origin: int32;
+        font: XID;
+        subwindow_mode: int32;
+        graphics_exposures: XBool;
+        clip_x_origin: int32;
+        clip_y_origin: int32;
+        clip_mask: XPixmap;
+        dash_offset: int32;
+        dashes: char;
+    endrecord;
+
+    // XExtData: record
+    //     number: int32;
+    //     next: pointer to XExtData;
+    //     extension: pointer to XExtData;
+    //     private_data: char; // XPointer
+    // endrecord;
+
+    // XGC: record
+    //     ext_data: XExtData;
+    //     gid: XID;
+    // endrecord;
+
+    // GC: pointer to XGC;
+    GC: dword;
+
+    XTextProperty: record;
+        value: dword;
+        encoding: uns32;
+        format: int32;
+        nitems: uns32;
+    endrecord;
+
+    Shape: record
+        dirs: uns16[4];
+        color: uns32;
+    endrecord;
+
+    Shapes: class
+        static
+            i: Shape := Shape:[[$0F00, $2222, $00F0, $4444], $00FFFF];
+            j: Shape := Shape:[[$44C0, $8E00, $6440, $0E20], $0000FF];
+            l: Shape := Shape:[[$4460, $0E80, $C440, $2E00], $EFA000];
+            o: Shape := Shape:[[$CC00, $CC00, $CC00, $CC00], $FFFF00];
+            s: Shape := Shape:[[$06C0, $8C40, $6C00, $4620], $00FF00];
+            t: Shape := Shape:[[$0E40, $4C40, $4E00, $4640], $A000EE];
+            z: Shape := Shape:[[$0C60, $4C80, $C600, $2640], $FF0000];
+    endclass;
+
+    Piece: class
+        var
+            x: uns8;
+            y: uns8;
+
+            pshape: dword;
+            dir: uns8;
+            color: uns32;
+
+        proc
+            create: procedure {@returns("esi")};
+            init: method(x: uns8; y: uns8);
+            figure: method;
+            rotate: method;
+    endclass;
+
+    Game: class
+        static
+            score: uns32 := 0;
+            state: uns8 := STATE_START;
+            board: dword;
+            board_length: uns32;
+            width: uns8 := 0;
+            height: uns8 := 0;
+            current_piece: Piece;
+
+        proc
+            create: procedure {@returns("esi")};
+            init: method(width: uns8; height: uns8);
+            addPiece: method;
+            getBlock: method(x: uns8; y: uns8) {@returns("eax")};
+            setBlock: method(x: uns8; y: uns8; color: uns32);
+            pieceBlocks: iterator;
+            intersects: method {@returns("al")};
+            breakLines: method;
+            drop: method;
+            hardDrop: method;
+            freeze: method;
+            move: method(deltax: int8);
+            rotate: method;
+            // draw: method;
+    endclass;
+
+static
+    VMT(Piece);
+    VMT(Game);
+
+    clock: timer_t;
+    cur_time: uns32;
+    last_time: uns32;
+    dtime: uns32;
+
+    display: dword;
+    win: XWindow;
+    event: XEvent;
+    hints: XSizeHints;
+    context: GC;
+    context_values: XGCValues;
+    wm_name: XTextProperty;
+
+    tetris: Game;
+    scale: uns32;
+    offset: uns32;
+    counter: uns32 := 0;
+    downPressed: boolean := false;
+    bag: dword[7] := [&Shapes.i, &Shapes.j, &Shapes.l, &Shapes.o, &Shapes.t, &Shapes.s, &Shapes.z];
+
+extern("XOpenDisplay", display_name: char);
+extern("XDefaultScreen", display: dword);
+extern("XDefaultRootWindow", display: dword);
+extern("XCreateSimpleWindow", display: dword; parent: dword; x: int32; y: int32; width: int32; height: uns32; border_width: uns32; border: dword; background: dword);
+extern("XSelectInput", display: dword; window: XWindow; event_mask: uns32);
+extern("XMapWindow", display: dword; window: XWindow);
+extern("XCloseDisplay", display: dword);
+extern("XSetWMNormalHints", display: dword; window: XWindow; hints: dword);
+extern("XSetWMName", display: dword; window: XWindow; text_prop: dword);
+extern("XStringListToTextProperty", list: dword; count: int32; text_prop_return: dword);
+
+extern("XNextEvent", display: dword; event: dword);
+extern("XMaskEvent", display: dword; event_mask: uns32; event: dword);
+extern("XCheckIfEvent", display: dword; event: dword);
+extern("XCheckMaskEvent", display: dword; event_mask: uns32; event: dword);
+extern("XWindowEvent", display: dword; window: XWindow; event_mask: uns32; event: dword);
+extern("XCheckWindowEvent", display: dword; window: XWindow; event_mask: uns32; event: dword);
+extern("XEventsQueued", display: dword; mode: int32);
+extern("XFlush", display: dword);
+extern("XSync", display: dword; discard: XBool);
+
+extern("XKeycodeToKeysym", display: dword; keycode: uns32; index: int32);
+extern("XKeysymToString", keysym: uns32);
+
+extern("XCreateGC", display: dword; d: XDrawable; valuemask: uns32; values: dword);
+extern("XGetGCValues", display: dword; context: GC; valuemask: uns32; values: dword);
+extern("XSetForeground", display: dword; context: GC; pixel: uns32);
+extern("XSetBackground", display: dword; context: GC; pixel: uns32);
+extern("XSetLineAttributes", display: dword; context: GC; line_width: uns32; line_style: int32; cap_style: int32; join_style: int32);
+extern("XSetFillStyle", display: dword; context: GC; fill_style: int32);
+extern("XDrawPoint", display: dword; d: XDrawable; context: GC; x: int32; y: int32);
+extern("XDrawRectangle", display: dword; d: XDrawable; context: GC; x: int32; y: int32; width: uns32; height: uns32);
+extern("XFillRectangle", display: dword; d: XDrawable; context: GC; x: int32; y: int32; width: uns32; height: uns32);
+extern("XClearWindow", display: dword; window: XWindow);
+extern("XClearArea", display: dword; window: XWindow; x: int32; y: int32; width: uns32; height: uns32; exposures: XBool);
+
+proc
+    randomPiece: procedure;
+    begin randomPiece;
+        rand.urange(0, 6);
+        lea(ebx, bag);
+        mov([ebx + eax * 4], eax);
+    end randomPiece;
+
+    Piece.create: procedure {@noframe @nodisplay};
+    begin create;
+        push(eax);
+
+        if (esi = 0) then
+            malloc(@size(Piece));
+            mov(eax, esi);
+        endif;
+
+        mov(&Piece._VMT_, this._pVMT_);
+
+        pop(eax);
+        ret();
+    end create;
+
+    Piece.init: method(x: uns8; y: uns8);
+    begin init;
+        mov(x, al);
+        mov(al, this.x);
+        mov(y, al);
+        mov(al, this.y);
+
+        randomPiece();
+        mov(eax, this.pshape);
+
+        add(@offset(Shape.color), eax);
+        mov([eax], this.color);
+
+        mov(0, this.dir);
+    end init;
+
+    Piece.figure: method;
+    begin figure;
+        push(ebx);
+        push(ecx);
+
+        mov(0, eax);
+        mov(0, ebx);
+        mov(0, ecx);
+
+        mov(this.pshape, ebx);
+        add(@offset(Shape.dirs), ebx);
+        mov(this.dir, cl);
+        mov([ebx + ecx * 2], ax);
+
+        pop(ecx);
+        pop(ebx);
+    end figure;
+
+    Piece.rotate: method;
+    begin rotate;
+        add(1, this.dir);
+        if (this.dir > 3) then
+            mov(0, this.dir);
+        endif;
+    end rotate;
+
+    Game.create: procedure {@noframe @nodisplay};
+    begin create;
+        push(eax);
+
+        if (esi = 0) then
+            malloc(@size(Game));
+            mov(eax, esi);
+        endif;
+
+        mov(&Game._VMT_, this._pVMT_);
+
+        pop(eax);
+        ret();
+    end create;
+
+    Game.init: method(width: uns8; height: uns8);
+    begin init;
+        push(eax);
+        push(ebx);
+
+        mov(width, al);
+        mov(al, this.width);
+        mov(height, al);
+        mov(al, this.height);
+
+        mul(this.width, al);
+        mov(eax, this.board_length);
+        mul(@size(uns32), eax);
+        mem.zalloc(eax);
+        mov(eax, this.board);
+
+        pop(ebx);
+        pop(eax);
+    end init;
+
+    Game.addPiece: method;
+    begin addPiece;
+        push(esi);
+        this.current_piece.create();
+        this.current_piece.init(3, 0);
+        pop(esi);
+    end addPiece;
+
+    Game.getBlock: method(x: uns8; y: uns8);
+    begin getBlock;
+        push(ebx);
+
+        mov(y, al);
+        mul(this.width, al);
+        add(x, al);
+
+        mov(this.board, ebx);
+        mov([ebx + eax * 4], eax);
+
+        pop(ebx);
+    end getBlock;
+
+    Game.setBlock: method(x: uns8; y: uns8; color: uns32);
+    begin setBlock;
+        push(ebx);
+
+        mov(0, eax);
+        mov(y, al);
+        mul(this.width, al);
+        add(x, al);
+
+        mov(this.board, ebx);
+        mov(color, [ebx + eax * 4]);
+
+        pop(ebx);
+    end setBlock;
+
+    Game.pieceBlocks: iterator;
+    static
+        bit: uns16;
+        blocks: uns16;
+        row: uns8;
+        col: uns8;
+    begin pieceBlocks;
+        push(esi);
+        this.current_piece.figure();
+        pop(esi);
+        mov(ax, blocks);
+
+        mov(0, row);
+        mov(0, col);
+        mov(0, bit);
+
+        for (mov($8000, bit); bit > 0; shr(1, bit)) do
+            mov(0, ax);
+            mov(blocks, ax);
+            and(bit, ax);
+
+            if (ax > 0) then
+                mov(0, eax);
+                mov(0, ebx);
+                mov(col, al);
+                mov(row, bl);
+
+                add(this.current_piece.x, al);
+                add(this.current_piece.y, bl);
+
+                yield();
+            endif;
+
+            inc(col);
+            if (col == 4) then
+                mov(0, col);
+                inc(row);
+            endif;
+        endfor;
+    end pieceBlocks;
+
+    Game.intersects: method;
+    var
+        intersection: boolean;
+        x: uns8;
+        y: uns8;
+    begin intersects;
+        push(ebx);
+        mov(false, intersection);
+
+        foreach this.pieceBlocks() do
+            mov(al, x);
+            mov(bl, y);
+
+            mov(this.width, al);
+            mov(this.height, bl);
+            sub(1, al);
+            sub(1, bl);
+
+            if ((y > bl) || (x > al) || (x < 0) || (this.getBlock(x, y) > 0)) then
+                mov(true, intersection);
+            endif;
+        endfor;
+
+        mov(intersection, al);
+        pop(ebx);
+    end intersects;
+
+    Game.breakLines: method;
+    var
+        zeros: uns8;
+    begin breakLines;
+        for (mov(1, eax); al < this.height; inc(eax)) do
+            mov(0, zeros);
+            for (mov(0, ebx); bl < this.width; inc(ebx)) do
+                push(eax);
+                this.getBlock(bl, al);
+                if ((type uns32 eax) == 0) then
+                    inc(zeros);
+                endif;
+                pop(eax);
+            endfor;
+            if (zeros == 0) then
+                for (mov(eax, ecx); ecx > 1; dec(ecx)) do
+                    push(ebx);
+                    for (mov(0, ebx); bl < this.width; inc(ebx)) do
+                        mov(ecx, edx);
+                        sub(1, edx);
+                        push(eax);
+                        this.getBlock(bl, dl);
+                        this.setBlock(bl, cl, eax);
+                        pop(eax);
+                    endfor;
+                    pop(ebx);
+                endfor;
+            endif;
+        endfor;
+    end breakLines;
+
+    Game.drop: method;
+    begin drop;
+        add(1, this.current_piece.y);
+        if (this.intersects()) then
+            sub(1, this.current_piece.y);
+            this.freeze();
+        endif;
+    end drop;
+
+    Game.hardDrop: method;
+    begin hardDrop;
+        while (!this.intersects()) do
+            add(1, this.current_piece.y);
+        endwhile;
+        sub(1, this.current_piece.y);
+        this.freeze();
+    end hardDrop;
+
+    Game.freeze: method;
+    begin freeze;
+        foreach this.pieceBlocks() do
+            this.setBlock(al, bl, this.current_piece.color);
+        endfor;
+        this.breakLines();
+        this.addPiece();
+        if (this.intersects()) then
+            mov(STATE_END, this.state);
+        endif;
+    end freeze;
+
+    Game.move: method(deltax: int8);
+    begin move;
+        push(eax);
+        push(ebx);
+
+        mov(this.current_piece.x, bl);
+        mov(deltax, al);
+        add(al, this.current_piece.x);
+        if (this.intersects()) then
+            mov(bl, this.current_piece.x);
+        endif;
+
+        pop(ebx);
+        pop(eax);
+    end move;
+
+    Game.rotate: method;
+    begin rotate;
+        push(eax);
+        push(ebx);
+
+        mov(this.current_piece.dir, bl);
+        push(esi);
+        this.current_piece.rotate();
+        pop(esi);
+        if (this.intersects()) then
+            mov(bl, this.current_piece.dir);
+        endif;
+
+        pop(ebx);
+        pop(eax);
+    end rotate;
+
+    drawBlock: procedure(x: uns8; y: uns8; color: uns32);
+    begin drawBlock;
+        mov((type int32 x), eax);
+        mul(scale, eax);
+        add(offset, eax);
+        mov(eax, ebx);
+
+        mov((type int32 y), eax);
+        mul(scale, eax);
+
+        pushad();
+        XSetForeground(display, context, color);
+        popad();
+        XFillRectangle(display, win, context, ebx, eax, scale, scale);
+    end drawBlock;
+
+    draw: procedure;
+    var
+        c: uns32;
+    begin draw;
+        XClearWindow(display, win);
+
+        for (mov(0, eax); al < tetris.height; inc(eax)) do
+            for (mov(0, ebx); bl < tetris.width; inc(ebx)) do
+                pushad();
+                mov(al, dl); // y
+                mov(bl, cl); // x
+
+                tetris.getBlock(cl, dl);
+                mov(eax, c);
+                if (c == 0) then
+                    drawBlock(cl, dl, $333333);
+                else
+                    drawBlock(cl, dl, eax);
+                endif;
+                popad();
+            endfor;
+        endfor;
+
+        if ((type uns32 tetris.current_piece) > 0) then
+            foreach tetris.pieceBlocks() do
+                drawBlock(al, bl, tetris.current_piece.color);
+            endfor;
+        endif;
+
+        XSync(display, 1);
+    end draw;
+
+begin Main;
+    // X SETUP
+    XOpenDisplay((type char 0));
+    if (eax == null) then stderr.put("Could not open X display"); ret(1); endif;
+    mov(eax, display);
+
+    XDefaultRootWindow(display);
+
+    XCreateSimpleWindow(display, eax, 100, 100, WIN_WIDTH, WIN_HEIGHT, 1, $000000, $000000);
+    if (eax == null) then stderr.put("Could not create X window"); ret(1); endif;
+    mov(eax, win);
+
+    XMapWindow(display, win);
+    XSelectInput(display, win, KeyPressMask | KeyReleaseMask | ButtonPressMask | ExposureMask);
+
+    mov(%110000, hints.flags);
+    mov(WIN_WIDTH, hints.min_width);
+    mov(WIN_WIDTH, hints.max_width);
+    mov(WIN_HEIGHT, hints.min_height);
+    mov(WIN_HEIGHT, hints.max_height);
+
+    XSetWMNormalHints(display, win, &hints);
+
+    str.a_cpy("Tetris");
+    mov(eax, wm_name.value);
+    mov(31, wm_name.encoding);
+    mov(8, wm_name.format);
+    mov(6, wm_name.nitems);
+    XSetWMName(display, win, &wm_name);
+
+    XCreateGC(display, win, %1100, &context_values);
+    lea(edx, context);
+    mov(eax, [edx]);
+
+    // GAME SETUP
+    rand.randomize();
+
+    tetris.create();
+    tetris.init(BOARD_WIDTH, BOARD_HEIGHT);
+
+    mov(0, edx);
+    mov(WIN_HEIGHT, eax);
+    div((type uns32 tetris.height), edx:eax);
+    mov(eax, scale);
+
+    mov(tetris.width, al);
+    mul(scale, eax);
+    mov(eax, ebx);
+    mov(WIN_WIDTH, eax);
+    sub(ebx, eax);
+    mov(0, edx);
+    div(2, edx:eax);
+    mov(eax, offset);
+
+    clock.create();
+    clock.start();
+    mov(0, last_time);
+
+    // MAIN LOOP
+    forever;
+        // CLOCK HANDLING
+        clock.checkPoint();
+        add(clock.msStarted, eax);
+        sub(1, eax);
+        add(clock.msStarted, eax);
+        mov(eax, cur_time);
+
+        mov(cur_time, eax);
+        sub(last_time, eax);
+        mov(eax, dtime);
+
+        if (dtime >= 33) then
+            mov(cur_time, last_time);
+
+            // MAIN LOOP BODY
+
+            if ((type uns32 tetris.current_piece) == 0) then
+                tetris.addPiece();
+            endif;
+
+            mov(dtime, eax);
+            add(eax, counter);
+            if (counter >= DROP_SPEED) then
+                mov(0, counter);
+
+                if (tetris.state == STATE_START) then
+                    tetris.drop();
+                endif;
+            elseif (downPressed) then
+                if (tetris.state == STATE_START) then
+                    tetris.drop();
+                endif;
+            endif;
+
+            XFlush(display);
+            XSync(display, 0);
+            XEventsQueued(display, QueuedAlready);
+            while (eax > 0) do
+                push(eax);
+                XNextEvent(display, &event);
+                if (event.event_type == 2) then
+                    XKeycodeToKeysym(display, event.xkey.keycode, 0);
+                    if (ax == KEY_LEFT) then
+                        tetris.move(-1);
+                    elseif (ax == KEY_RIGHT) then
+                        tetris.move(1);
+                    elseif (ax == KEY_UP) then
+                        tetris.rotate();
+                    elseif (ax == KEY_DOWN) then
+                        mov(true, downPressed);
+                    endif;
+                elseif (event.event_type == 3) then
+                    XKeycodeToKeysym(display, event.xkey.keycode, 0);
+                    if (ax == KEY_DOWN) then
+                        mov(false, downPressed);
+                    endif;
+                endif;
+                pop(eax);
+                dec(eax);
+            endwhile;
+
+            draw();
+
+            if (tetris.state == STATE_END) then
+                mem.free(tetris.board);
+                tetris.addPiece();
+                tetris.init(BOARD_WIDTH, BOARD_HEIGHT);
+                mov(false, downPressed);
+                mov(STATE_START, tetris.state);
+            endif;
+
+            // MAIN LOOP BODY
+        endif;
+    endfor;
+
+    XCloseDisplay(display);
+end Main;
